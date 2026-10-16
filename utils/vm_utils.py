@@ -146,6 +146,8 @@ def take_vm_screenshot(
 ) -> bool:
     """Boot an OSWorld VM, save an initial screenshot, and stop the emulator."""
     osworld_root = str(osworld_root)
+    if provider_name == "vmware" and not Path(path_to_vm).is_absolute():
+        path_to_vm = str((Path(osworld_root) / path_to_vm).resolve())
     project_root = str(PROJECT_ROOT)
     for import_path in (osworld_root, project_root):
         if import_path in sys.path:

@@ -495,6 +495,97 @@ def _maybe_harden_save(cmd):
     return cmd, False
 
 
+def _capture_setup_visual(setup_controller, label):
+    """Persist a VM screenshot so setup progress/failures are visible in the dashboard."""
+    output = os.environ.get("MACU_SETUP_VISUAL_PATH", "").strip()
+    if not output:
+        return
+    try:
+        response = requests.get(f"{setup_controller.http_server}/screenshot", timeout=10)
+        response.raise_for_status()
+        output_path = os.path.abspath(output)
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        temporary = output_path + f".{os.getpid()}.tmp"
+        with open(temporary, "wb") as handle:
+            handle.write(response.content)
+        os.replace(temporary, output_path)
+        logger.info("Visual check (%s) saved to %s", label, output_path)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not capture setup visual (%s): %s", label, exc)
+
+
+def _dismiss_libreoffice_recovery(setup_controller):
+    """Dismiss LibreOffice's stale recovery dialog left by hard VM shutdowns."""
+    script = (
+        "import pyautogui, subprocess, time\n"
+        "time.sleep(1)\n"
+        "title = subprocess.run(['xdotool','getactivewindow','getwindowname'], "
+        "capture_output=True, text=True).stdout\n"
+        "if 'Document Recovery' in title:\n"
+        f"    pyautogui.click({int(1920 * 0.64)}, {int(1080 * 0.677)})\n"
+        "    time.sleep(2)\n"
+    )
+    try:
+        response = requests.post(
+            f"{setup_controller.http_server}/execute",
+            json={"command": ["python", "-c", script], "shell": False},
+            timeout=10,
+        )
+        response.raise_for_status()
+        logger.info("Checked for and dismissed LibreOffice Document Recovery")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("LibreOffice recovery-dialog cleanup failed: %s", exc)
+
+
+def _patch_setup_controller_open_timeout():
+    """Bound OSWorld's 30-minute open-file request and capture its visible state.
+
+    The guest sometimes opens LibreOffice successfully but never completes the
+    HTTP response. After the short timeout we keep going: the first CUA
+    observation is the authoritative visual check of whether the document is
+    usable.
+    """
+    try:
+        from desktop_env.controllers.setup import SetupController
+    except Exception as exc:  # pragma: no cover
+        logger.warning("setup open timeout patch skipped: %s", exc)
+        return
+    if getattr(SetupController._open_setup, "_macu_timeout_patched", False):
+        return
+
+    def open_with_timeout(self, path):
+        if not path:
+            raise Exception(f"Setup Open - Invalid path ({path}).")
+        timeout = max(5.0, float(os.environ.get("MACU_OPEN_FILE_TIMEOUT_SECONDS", "30")))
+        logger.info("Opening %s in guest (timeout %.0fs, with visual check)", path, timeout)
+        try:
+            response = requests.post(
+                f"{self.http_server}/setup/open_file",
+                headers={"Content-Type": "application/json"},
+                data=json.dumps({"path": path}),
+                timeout=timeout,
+            )
+            response.raise_for_status()
+            logger.info("Command executed successfully: %s", response.text)
+            _dismiss_libreoffice_recovery(self)
+            _capture_setup_visual(self, "file opened")
+        except requests.exceptions.Timeout:
+            logger.warning(
+                "Guest open-file request exceeded %.0fs; capturing the screen and "
+                "continuing to the CUA visual check instead of waiting 30 minutes.",
+                timeout,
+            )
+            _dismiss_libreoffice_recovery(self)
+            _capture_setup_visual(self, "open-file timeout")
+        except requests.exceptions.RequestException as exc:
+            _capture_setup_visual(self, "open-file error")
+            raise RuntimeError(f"Failed to open file {path!r}: {exc}") from exc
+
+    open_with_timeout._macu_timeout_patched = True
+    SetupController._open_setup = open_with_timeout
+    logger.info("Patched SetupController._open_setup with short timeout + visual check")
+
+
 def _patch_setup_controller_save_dialog():
     """Wrap SetupController._execute_setup to harden Ctrl+S commands."""
     try:
@@ -542,4 +633,5 @@ def apply():
     _register_apptainer_provider()
     _patch_desktop_env_init_for_apptainer()
     _patch_desktop_env_init_for_resolution()
+    _patch_setup_controller_open_timeout()
     _patch_setup_controller_save_dialog()

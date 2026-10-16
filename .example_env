@@ -1,3 +1,13 @@
+# Required by the Tinker-powered MACU dashboard and experiment runner.
+TINKER_API_KEY=tk-dummy
+
+# Optional dashboard providers. Keys are read only from .env and are never
+# entered into, stored by, or returned to the browser.
 ANTHROPIC_API_KEY=sk-ant-dummy
 OPENAI_API_KEY=sk-dummy
 GEMINI_API_KEY=gemini-dummy
+OPENROUTER_API_KEY=sk-or-v1-dummy
+
+# For a local Qwen CUA, point this at its OpenAI-compatible vLLM endpoint.
+# OPENAI_API_KEY may be set to "dummy" when the local server has no auth.
+OPENAI_BASE_URL=http://127.0.0.1:8000/v1

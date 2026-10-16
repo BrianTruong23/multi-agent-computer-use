@@ -315,6 +315,43 @@ Useful flags:
 - `--output-dir DIR` — write the viewer somewhere other than `<run_dir>/visualization`
 - `--max-frames N` — cap keyframes per subtask (default 16); bump higher for very long subtasks
 
+### Local OSWorld Evaluation Dashboard
+
+Use the local dashboard to browse GIMP, LibreOffice Calc, and LibreOffice
+Impress tasks from an OSWorld checkout, verify environment/VM readiness, launch
+Tinker-powered multi-agent runs, watch worker logs, compare evaluator scores,
+and build run replays. It includes a curated **Shared canvas** group of 17 tasks
+that naturally split into independent regions of one image, worksheet, or deck.
+
+Create a Tinker key in the Tinker Console and put it in `.env`:
+
+```bash
+TINKER_API_KEY=tk-...
+```
+
+Then start the dashboard:
+
+```bash
+source .venv/bin/activate
+set -a && source .env && set +a
+python scripts/macu_dashboard.py --host 127.0.0.1 --port 8002 --open
+```
+
+The dashboard is available at `http://127.0.0.1:8002`. It binds to localhost
+and never returns the API key to the browser. Manager and CUA calls use Tinker's
+Anthropic-compatible endpoint; CUA selection is restricted to vision models.
+The UI shows current published input/output rates and a pre-run estimate.
+Experiments have a cross-process spend guard capped at **$15**: each manager or
+CUA call reserves its maximum possible cost before being sent, so calls that
+would cross the cap are blocked. Use a new result directory for each experiment.
+
+The five exposed model families are Qwen (`Qwen/Qwen3.8-27B`), Thinking
+Machines (`thinkingmachines/Inkling-Small`), NVIDIA
+(`nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16`), Moonshot
+(`moonshotai/Kimi-K2.6`), and OpenAI (`openai/gpt-oss-120b`). GPT-OSS is
+manager-only because Tinker's catalog does not mark it as vision-capable.
+Prices come from [Tinker Models & Pricing](https://tinker-docs.thinkingmachines.ai/tinker/models/models_and_pricing/).
+
 
 ## Citation
 

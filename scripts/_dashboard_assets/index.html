@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="Local dashboard for evaluating multi-agent MACU runs on OSWorld GIMP and LibreOffice Calc tasks">
+  <title>MACU · OSWorld Lab</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/assets/app.css">
+</head>
+<body>
+  <header class="masthead">
+    <div class="container masthead__inner">
+      <div>
+        <div class="eyebrow">LOCAL EXPERIMENT CONSOLE</div>
+        <h1>MACU <span>×</span> OSWorld Lab</h1>
+        <p>Run Tinker-powered multi-agent experiments on curated shared-canvas OSWorld tasks.</p>
+      </div>
+      <div id="job-pill" class="job-pill idle"><i></i><span>No active run</span></div>
+    </div>
+  </header>
+
+  <main class="container layout">
+    <section class="panel setup-panel">
+      <div class="panel__head">
+        <div><div class="step">01 / ENVIRONMENT</div><h2>Readiness</h2></div>
+        <button class="button secondary" id="refresh-setup" title="Stops active runs, powers off pool VMs, and checks readiness">Stop &amp; recheck</button>
+      </div>
+      <div class="field-grid two">
+        <label class="field wide"><span>OSWorld root</span><input id="osworld-root" autocomplete="off"></label>
+        <label class="field"><span>VM provider</span><select id="vm-provider"><option value="vmware">VMware</option><option value="apptainer">Apptainer</option></select></label>
+        <label class="field"><span>Result directory</span><input id="result-root" value="runs/dashboard" autocomplete="off"><small>Use a new directory for each configuration; completed or claimed task IDs are skipped on rerun.</small></label>
+      </div>
+      <div id="checks" class="checks"><div class="empty">Checking environment…</div></div>
+      <div class="callout" id="readiness-callout"></div>
+    </section>
+
+    <section class="panel tasks-panel">
+      <div class="panel__head">
+        <div><div class="step">02 / BENCHMARK</div><h2>Choose OSWorld tasks</h2></div>
+        <div class="selection-count"><strong id="selected-count">0</strong> selected</div>
+      </div>
+      <div class="task-tools">
+        <div class="tabs" role="tablist" aria-label="Task domain filter">
+          <button class="tab active" data-domain="all">All</button>
+          <button class="tab" data-domain="shared_canvas">Shared canvas</button>
+          <button class="tab" data-domain="gimp">GIMP</button>
+          <button class="tab" data-domain="libreoffice_impress">Impress</button>
+          <button class="tab" data-domain="libreoffice_calc">Calc</button>
+        </div>
+        <input id="task-search" class="search" type="search" placeholder="Search instructions or IDs…">
+        <button class="button secondary small" id="select-visible">Select visible</button>
+        <button class="button secondary small" id="save-default">Save selection as default</button>
+        <button class="button text small" id="clear-selection">Clear</button>
+      </div>
+      <div id="tasks" class="task-list"><div class="empty">Point the dashboard at an OSWorld checkout to discover tasks.</div></div>
+    </section>
+
+    <section class="panel launch-panel">
+      <div class="panel__head">
+        <div><div class="step">03 / ORCHESTRATION</div><h2>Run configuration</h2></div>
+        <span class="hint">Fields before/after the MACU <code>--</code> boundary are handled for you.</span>
+      </div>
+      <div class="mode-picker" role="radiogroup" aria-label="Execution framework">
+        <label class="mode-option"><input type="radio" name="run-mode" value="single"><span><strong>Single Agent</strong><small>One CUA completes the full task without manager decomposition.</small></span></label>
+        <label class="mode-option selected"><input type="radio" name="run-mode" value="macu" checked><span><strong>MACU</strong><small>Manager-generated dependency graph with parallel CUA workers.</small></span></label>
+        <label class="mode-option locked"><input type="radio" name="run-mode" value="multi_cursor" disabled><span><strong>Multi-Cursor</strong><small>Your future framework integration.</small></span><b>LOCKED</b></label>
+      </div>
+      <div class="config-columns">
+        <fieldset id="manager-config">
+          <legend>Manager</legend>
+          <label class="field"><span>Provider</span><select id="manager-provider"><option value="tinker">Tinker</option><option value="google">Google Gemini</option><option value="openrouter">OpenRouter fallback</option></select></label>
+          <label class="field"><span>Model</span><select id="manager-model" class="model-select"></select></label>
+          <label class="field"><span>Maximum replans</span><input id="max-replans" type="number" min="0" max="50" value="10"></label>
+        </fieldset>
+        <fieldset>
+          <legend>Computer-use agents</legend>
+          <label class="field"><span>Provider</span><select id="cua-provider"><option value="tinker">Tinker</option><option value="openai">OpenAI</option><option value="qwen">Local Qwen server</option></select></label>
+          <label class="field"><span>Vision model</span><select id="cua-model" class="model-select"></select></label>
+          <label class="field"><span>Maximum CUA steps</span><input id="max-steps" type="number" min="1" max="500" value="60"></label>
+        </fieldset>
+        <fieldset>
+          <legend>Collaboration</legend>
+          <label class="field"><span>Parallel agents</span><input id="max-parallelism" type="number" min="1" max="16" value="3"></label>
+          <label class="field"><span>Hard API cap</span><input id="max-cost-usd" type="number" value="15" min="0.01" max="15" step="0.01"><small>Enforced across manager and CUA processes with worst-case per-call reservations.</small></label>
+          <div class="explain"><strong>What this means</strong><p>For each selected OSWorld task, the manager creates a DAG and runs up to this many ready CUA branches at once. Selected benchmark tasks themselves are processed one after another.</p></div>
+        </fieldset>
+      </div>
+      <div class="cost-preview" id="cost-preview"><strong>Select tasks to calculate estimated Tinker cost.</strong></div>
+      <div class="model-catalog" id="model-catalog"></div>
+      <p class="pricing-source">Prices are USD per million tokens from <a href="https://tinker-docs.thinkingmachines.ai/tinker/models/models_and_pricing/" target="_blank" rel="noreferrer">Tinker Models &amp; Pricing</a>. GPT-OSS is manager-only because it has no vision input.</p>
+      <div class="launch-actions">
+        <button class="button primary" id="launch">Launch selected tasks</button>
+        <button class="button danger" id="stop" disabled>Stop active run</button>
+        <span id="launch-message" role="status"></span>
+      </div>
+    </section>
+
+    <section class="panel monitor-panel">
+      <div class="panel__head monitor-head">
+        <div><div class="step">04 / LIVE RUN</div><h2>Run monitor</h2></div>
+        <div class="monitor-tabs" role="tablist" aria-label="Live run view">
+          <button class="monitor-tab active" id="log-tab" role="tab" aria-selected="true" data-monitor="log-pane">Worker log</button>
+          <button class="monitor-tab" id="vms-tab" role="tab" aria-selected="false" data-monitor="vms-pane">MACU_Visualization_LiveVMs <span id="live-vm-count">0</span></button>
+        </div>
+        <button class="button secondary small" id="copy-command">Copy command</button>
+      </div>
+      <div id="run-context" class="run-context" hidden></div>
+      <div class="metrics" id="job-metrics">
+        <div><span>Status</span><strong>Idle</strong></div><div><span>Elapsed</span><strong>—</strong></div><div><span>Exit code</span><strong>—</strong></div>
+      </div>
+      <div id="log-pane" class="monitor-pane active" role="tabpanel" aria-labelledby="log-tab">
+        <pre id="log" class="log" aria-live="polite">Waiting for a run…</pre>
+      </div>
+      <div id="vms-pane" class="monitor-pane" role="tabpanel" aria-labelledby="vms-tab">
+        <div class="vm-toolbar">
+          <p>Latest screenshots and actions from every computer-use agent.</p>
+          <div class="vm-toolbar-actions">
+            <div class="view-switch" role="group" aria-label="VM visualization">
+              <button class="view-button" id="vm-grid-view">VM grid</button>
+              <button class="view-button active" id="vm-graph-view">Dependency map</button>
+            </div>
+            <button class="button secondary small" id="expand-vms">Expand all VMs</button>
+          </div>
+        </div>
+        <div id="agent-test-conditions" class="test-conditions"><span>TEST CONDITIONS</span><strong>Waiting for an agent configuration…</strong></div>
+        <div id="live-vms" class="vm-grid"><div class="empty">VMs will appear after the manager creates the task graph.</div></div>
+        <div id="live-graph" class="dependency-view active">
+          <div class="graph-controls"><button class="button secondary small" id="graph-zoom-out" title="Zoom out">−</button><button class="button secondary small" id="graph-fit">Fit</button><button class="button secondary small" id="graph-zoom-in" title="Zoom in">+</button><button class="button secondary small" id="graph-fullscreen">Full screen</button><span id="graph-zoom-label">100%</span></div>
+          <div id="graph-viewport" class="graph-viewport"><div class="empty">The dependency map appears when the manager creates the graph.</div></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel results-panel">
+      <div class="panel__head">
+        <div><div class="step">05 / EVALUATION</div><h2>Evaluation &amp; past runs</h2><p class="hint">Completed runs retain their OSWorld score, interactive action replay, and MP4 video.</p></div>
+        <button class="button secondary" id="refresh-results">Refresh</button>
+      </div>
+      <div class="score-summary" id="score-summary"></div>
+      <div id="results" class="results"><div class="empty">Completed and in-progress task results will appear here.</div></div>
+    </section>
+  </main>
+
+  <dialog id="result-dialog">
+    <div class="dialog-head"><div><div class="step">FINAL RESPONSE</div><h2 id="dialog-title"></h2></div><button class="icon-button" id="close-dialog" aria-label="Close">×</button></div>
+    <p id="dialog-instruction" class="dialog-instruction"></p>
+    <pre id="dialog-response" class="response"></pre>
+  </dialog>
+
+  <dialog id="vms-dialog" class="vms-dialog">
+    <div class="dialog-head"><div><div class="step">LIVE MULTI-AGENT VIEW</div><h2>All virtual machines</h2></div><button class="icon-button" id="close-vms-dialog" aria-label="Close">×</button></div>
+    <div id="expanded-live-vms" class="vm-grid expanded"></div>
+  </dialog>
+
+  <dialog id="vm-image-dialog" class="vm-image-dialog">
+    <div class="dialog-head"><div><div class="step">VM SCREEN</div><h2 id="vm-image-title">Agent screen</h2></div><button class="icon-button" id="close-vm-image" aria-label="Close">×</button></div>
+    <div class="image-zoom-controls"><button class="button secondary small" id="image-zoom-out">−</button><button class="button secondary small" id="image-zoom-reset">100%</button><button class="button secondary small" id="image-zoom-in">+</button><span>Scroll to pan · use controls to zoom</span></div>
+    <div class="image-zoom-viewport"><img id="vm-image-full" alt="Expanded VM screen"></div>
+  </dialog>
+
+  <footer><div class="container">Runs bind to <code>127.0.0.1</code> by default. API keys are read from the dashboard process environment and are never returned to the browser.</div></footer>
+  <script src="/assets/app.js" defer></script>
+</body>
+</html>

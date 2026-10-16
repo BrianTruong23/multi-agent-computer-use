@@ -3,6 +3,8 @@ __pycache__/
 .venv/
 .env
 outputs/
+cache/
+.lavish/
 
 # Generated run outputs and artifacts
 runs/

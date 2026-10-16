@@ -147,14 +147,20 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
         default=None,
         help="Path to the local OSWorld checkout. Required for OSWorld-backed runs.",
     )
-    parser.add_argument("--cua-provider", type=str, default="qwen", choices=["qwen", "openai"])
+    parser.add_argument("--cua-provider", type=str, default="qwen", choices=["qwen", "openai", "tinker"])
     parser.add_argument(
         "--manager-provider",
         type=str,
         default="anthropic",
-        choices=["openai", "anthropic", "huggingface", "google"],
+        choices=["openai", "anthropic", "huggingface", "google", "tinker"],
     )
     parser.add_argument("--manager-model", type=str, default="claude-opus-4-6")
+    parser.add_argument(
+        "--max-cost-usd",
+        type=float,
+        default=15.0,
+        help="Cross-process Tinker spend cap in USD (default: 15).",
+    )
     parser.add_argument("--manager-max-tokens", type=int, default=8192)
     parser.add_argument(
         "--manager-reasoning-effort",
@@ -251,6 +257,12 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
     args.python = sys.executable
     args.result_dir = str(Path(args.result_dir).resolve())
     args.osworld_data_dir = str(Path(args.osworld_data_dir).resolve())
+    if args.max_cost_usd <= 0:
+        parser.error("--max-cost-usd must be greater than 0")
+    os.environ["MACU_MAX_COST_USD"] = str(args.max_cost_usd)
+    os.environ["MACU_BUDGET_FILE"] = str(
+        Path(args.result_dir) / "_budget" / "tinker_spend.json"
+    )
 
     if args.raw_task is not None:
         task_text = args.raw_task.strip()

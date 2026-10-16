@@ -169,8 +169,8 @@ class Qwen35VLAgent:
             raise ValueError("qwen35vl_agent only supports pyautogui action space")
         if observation_type != "screenshot":
             raise ValueError("qwen35vl_agent only supports screenshot observations")
-        if api_backend != "openai":
-            raise ValueError("qwen35vl_agent only supports OpenAI-compatible APIs")
+        if api_backend not in {"openai", "tinker"}:
+            raise ValueError("qwen35vl_agent supports OpenAI-compatible APIs or Tinker")
         if self.image_max < 1:
             raise ValueError("image_max must be >= 1")
         if self.fold_size < 1:
@@ -1122,9 +1122,157 @@ class Qwen35VLAgent:
         self._last_inference_time += duration
         self._last_inference_intervals.append(interval)
 
+    @staticmethod
+    def _tinker_content(content) -> List[Dict[str, Any]]:
+        if isinstance(content, str):
+            return [{"type": "text", "text": content}]
+        converted: List[Dict[str, Any]] = []
+        for part in content or []:
+            if not isinstance(part, dict):
+                continue
+            if part.get("type") == "text":
+                converted.append({"type": "text", "text": part.get("text", "")})
+            elif part.get("type") == "image_url":
+                url = ((part.get("image_url") or {}).get("url")) or ""
+                if url.startswith("data:image/") and ";base64," in url:
+                    header, data = url.split(",", 1)
+                    media_type = header.split(":", 1)[1].split(";", 1)[0]
+                    converted.append({
+                        "type": "image",
+                        "source": {"type": "base64", "media_type": media_type, "data": data},
+                    })
+                elif url:
+                    converted.append({
+                        "type": "image", "source": {"type": "url", "url": url},
+                    })
+        return converted
+
+    def _tinker_request(self, payload: Dict, model: str) -> str:
+        """Use Tinker's Anthropic-compatible API (base models + vision + tools)."""
+        import anthropic
+        from utils.tinker_utils import TINKER_ANTHROPIC_BASE_URL, TinkerSpendGuard
+
+        api_key = os.environ.get("TINKER_API_KEY")
+        if not api_key:
+            raise ValueError("TINKER_API_KEY is required for Tinker CUA runs")
+        client = anthropic.Anthropic(
+            api_key=api_key,
+            base_url=os.environ.get("TINKER_ANTHROPIC_BASE_URL", TINKER_ANTHROPIC_BASE_URL),
+        )
+        system_parts: List[str] = []
+        messages: List[Dict[str, Any]] = []
+        for message in payload.get("messages", []):
+            role = message.get("role")
+            if role == "system":
+                system_parts.extend(
+                    part.get("text", "") for part in self._tinker_content(message.get("content"))
+                    if part.get("type") == "text"
+                )
+                continue
+            if role == "tool":
+                converted_role = "user"
+                converted_content = [{
+                    "type": "tool_result",
+                    "tool_use_id": message.get("tool_call_id"),
+                    "content": str(message.get("content") or "Tool call completed."),
+                }]
+            elif role == "assistant":
+                converted_role = "assistant"
+                converted_content = self._tinker_content(message.get("content"))
+                for call in message.get("tool_calls") or []:
+                    function = call.get("function") or {}
+                    converted_content.append({
+                        "type": "tool_use",
+                        "id": call.get("id"),
+                        "name": function.get("name"),
+                        "input": self._coerce_tool_arguments(function.get("arguments")),
+                    })
+            else:
+                converted_role = "user"
+                converted_content = self._tinker_content(message.get("content"))
+            if not converted_content:
+                converted_content = [{"type": "text", "text": ""}]
+            if messages and messages[-1]["role"] == converted_role:
+                messages[-1]["content"].extend(converted_content)
+            else:
+                messages.append({"role": converted_role, "content": converted_content})
+
+        tools = []
+        for item in payload.get("tools") or []:
+            function = item.get("function") or {}
+            tools.append({
+                "name": function.get("name"),
+                "description": function.get("description", ""),
+                "input_schema": function.get("parameters") or {"type": "object"},
+            })
+        kwargs: Dict[str, Any] = {
+            "model": model,
+            "system": "\n\n".join(system_parts),
+            "messages": messages,
+            "max_tokens": payload.get("max_tokens", self.max_tokens),
+            "temperature": payload.get("temperature", self.temperature),
+            "top_p": payload.get("top_p", self.top_p),
+        }
+        if tools:
+            kwargs["tools"] = tools
+            kwargs["tool_choice"] = {"type": "auto"}
+
+        count_kwargs = {
+            key: value for key, value in kwargs.items()
+            if key not in {"max_tokens", "temperature", "top_p", "tool_choice"}
+        }
+        input_tokens = client.messages.count_tokens(**count_kwargs).input_tokens
+        guard = TinkerSpendGuard()
+        reservation_id = guard.reserve(model, input_tokens, kwargs["max_tokens"])
+        try:
+            response = client.messages.create(**kwargs)
+        except Exception:
+            guard.release(reservation_id)
+            raise
+        actual_input = int(getattr(response.usage, "input_tokens", input_tokens) or input_tokens)
+        actual_output = int(getattr(response.usage, "output_tokens", 0) or 0)
+        actual_cost = guard.settle(reservation_id, model, actual_input, actual_output)
+        self.input_tokens_total += actual_input
+        self.output_tokens_total += actual_output
+        self.api_cost_total += actual_cost
+
+        texts: List[str] = []
+        reasoning: List[str] = []
+        native_calls: List[Dict[str, Any]] = []
+        for block in response.content:
+            block_type = getattr(block, "type", None)
+            if block_type == "text":
+                texts.append(getattr(block, "text", ""))
+            elif block_type == "thinking":
+                reasoning.append(getattr(block, "thinking", ""))
+            elif block_type == "tool_use":
+                native_calls.append({
+                    "id": getattr(block, "id", f"call_{len(native_calls) + 1}"),
+                    "type": "function",
+                    "function": {
+                        "name": getattr(block, "name", ""),
+                        "arguments": json.dumps(getattr(block, "input", {}) or {}, ensure_ascii=False),
+                    },
+                })
+        native_calls = self._normalize_native_tool_calls(native_calls)
+        tool_text = self._serialize_native_tool_calls(native_calls)
+        text = "\n".join(part for part in texts if part).strip()
+        self._last_native_tool_calls = native_calls
+        self._last_assistant_content = text
+        self._last_reasoning = "\n".join(reasoning).strip()
+        if tool_text:
+            text = f"{text}\n\n{tool_text}".strip()
+        return text
+
     def call_llm(self, payload: Dict, model: str) -> str:
         self._last_inference_time = 0.0
         self._last_inference_intervals = []
+        if self.api_backend == "tinker":
+            inference_started_at = time.time()
+            try:
+                return self._tinker_request(payload, model)
+            finally:
+                self._record_inference_call(inference_started_at, time.time())
         base_url = os.environ.get("OPENAI_BASE_URL", "http://127.0.0.1:8000/v1")
         api_key = os.environ.get("OPENAI_API_KEY", "dummy")
         default_timeout = str(
@@ -1298,3 +1446,6 @@ class Qwen35VLAgent:
         self.inference_intervals = []
         self._last_inference_time = 0.0
         self._last_inference_intervals = []
+        self.input_tokens_total = 0
+        self.output_tokens_total = 0
+        self.api_cost_total = 0.0

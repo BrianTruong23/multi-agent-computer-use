@@ -40,6 +40,8 @@ MODEL_RATES = {
     "claude-opus-4-20250514": {"input": 5.0, "output": 25.0},
     "gemini-3.1-pro-preview": {"input": 2.0, "output": 12.0},
     "gemini-3.1-flash-lite-preview": {"input": 0.25, "output": 1.5},
+    "moonshotai/kimi-k3": {"input": 0.304, "output": 11.936},
+    "google/gemma-4-26b-a4b-it": {"input": 0.0675, "output": 0.225},
 }
 
 def compute_cost(model: str, input_tokens: int, output_tokens: int) -> float:
@@ -347,6 +349,95 @@ def call_anthropic(
     )
 
 
+def call_tinker(
+    system_prompt: str,
+    user_prompt: str,
+    model: str = "Qwen/Qwen3.8-27B",
+    temperature: float = 0.0,
+    max_tokens: int = 4096,
+    api_key: Optional[str] = None,
+    image_path: Optional[Union[str, Path, Sequence[Union[str, Path]]]] = None,
+    user_segments: Optional[list[dict]] = None,
+) -> tuple[str, UsageInfo]:
+    """Call a Tinker base model through its Anthropic-compatible endpoint."""
+    import anthropic
+    from utils.tinker_utils import (
+        TINKER_ANTHROPIC_BASE_URL,
+        TINKER_MODELS,
+        TinkerSpendGuard,
+    )
+
+    resolved_key = api_key or os.environ.get("TINKER_API_KEY")
+    if not resolved_key:
+        raise ValueError("TINKER_API_KEY is required for provider='tinker'")
+    client = anthropic.Anthropic(
+        api_key=resolved_key,
+        base_url=os.environ.get("TINKER_ANTHROPIC_BASE_URL", TINKER_ANTHROPIC_BASE_URL),
+    )
+    supports_images = bool(TINKER_MODELS.get(model, {}).get("image_input"))
+    if user_segments is not None:
+        effective_segments = user_segments
+        if not supports_images:
+            effective_segments = [seg for seg in user_segments if seg.get("type") != "image"]
+            if len(effective_segments) != len(user_segments):
+                effective_segments.append({
+                    "type": "text",
+                    "text": "[Screenshots omitted because this model's current Tinker endpoint does not accept image input.]",
+                })
+        user_content = _segments_to_provider_content(effective_segments, provider="anthropic")
+    else:
+        image_paths = _normalize_image_paths(image_path) if supports_images else []
+        user_content = []
+        for item in image_paths:
+            data, media_type = _read_image(item, as_base64=True)
+            user_content.append({
+                "type": "image",
+                "source": {"type": "base64", "media_type": media_type, "data": data},
+            })
+        user_content.append({"type": "text", "text": user_prompt})
+        if not image_paths:
+            user_content = user_prompt
+
+    messages = [{"role": "user", "content": user_content}]
+    token_count = client.messages.count_tokens(
+        model=model,
+        system=system_prompt,
+        messages=messages,
+    ).input_tokens
+    guard = TinkerSpendGuard()
+    reservation_id = guard.reserve(model, token_count, max_tokens)
+    inference_started_at = time.time()
+    try:
+        response = client.messages.create(
+            model=model,
+            system=system_prompt,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+    except Exception:
+        guard.release(reservation_id)
+        raise
+    inference_ended_at = time.time()
+    usage = response.usage
+    input_tokens = int(getattr(usage, "input_tokens", token_count) or token_count)
+    output_tokens = int(getattr(usage, "output_tokens", 0) or 0)
+    cost = guard.settle(reservation_id, model, input_tokens, output_tokens)
+    text = "".join(
+        getattr(block, "text", "")
+        for block in response.content
+        if getattr(block, "type", None) == "text"
+    )
+    return text, UsageInfo(
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        model=model,
+        cost_usd=cost,
+        inference_seconds=inference_ended_at - inference_started_at,
+        inference_intervals=[(inference_started_at, inference_ended_at)],
+    )
+
+
 # Cheap insurance for vllm deployments without --reasoning-parser qwen3:
 # the raw model emits "<think>...</think>final answer" and we want the answer.
 _THINK_PREFIX_RE = re.compile(r"^\s*<think>.*?</think>\s*", re.DOTALL)
@@ -617,6 +708,17 @@ def call_llm(
         if temperature != 0.0:
             kw["temperature"] = temperature
         return call_huggingface(**kw)
+    elif provider == "tinker":
+        return call_tinker(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            model=model or "Qwen/Qwen3.8-27B",
+            temperature=temperature,
+            max_tokens=max_tokens,
+            api_key=api_key,
+            image_path=image_path,
+            user_segments=user_segments,
+        )
     elif provider == "google":
         return call_google(
             system_prompt=system_prompt,
@@ -631,7 +733,7 @@ def call_llm(
     else:
         raise ValueError(
             f"Unknown provider: {provider!r}. Use 'openai', 'anthropic', 'huggingface', "
-            "or 'google'."
+            "'tinker', or 'google'."
         )
 
 

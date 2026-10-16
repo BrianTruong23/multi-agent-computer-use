@@ -105,6 +105,7 @@ def extract_cua_result_from_dir(
     total_input = 0
     total_output = 0
     total_inference_seconds = 0.0
+    total_recorded_cost = 0.0
     inference_intervals: list[tuple[float, float]] = []
 
     if not traj_files:
@@ -149,9 +150,10 @@ def extract_cua_result_from_dir(
                         or 0
                     )
                     total_inference_seconds += _coerce_float(inference_seconds)
+                    total_recorded_cost += _coerce_float(model_usage.get("cost_usd"))
                     inference_intervals.extend(_extract_inference_interval(model_usage))
 
-    cost = compute_cost(cua_model, total_input, total_output)
+    cost = total_recorded_cost or compute_cost(cua_model, total_input, total_output)
     usage = UsageInfo(
         input_tokens=total_input,
         output_tokens=total_output,

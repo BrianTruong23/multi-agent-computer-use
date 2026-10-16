@@ -87,9 +87,9 @@ def config() -> argparse.Namespace:
     parser.add_argument(
         "--cua_provider",
         type=str,
-        choices=["qwen", "openai"],
+        choices=["qwen", "openai", "tinker"],
         default="qwen",
-        help="CUA agent provider: qwen or openai (GPT-5.4).",
+        help="CUA agent provider: qwen, Tinker vision model, or openai (GPT-5.4).",
     )
 
     # Paths / dataset generation
@@ -234,29 +234,34 @@ def config() -> argparse.Namespace:
     args = parser.parse_args()
 
     # Apply provider-specific defaults
+    qwen_style_provider = args.cua_provider in {"qwen", "tinker"}
     if args.model is None:
-        args.model = "Qwen/Qwen3.6-27B" if args.cua_provider == "qwen" else "gpt-5.4"
+        args.model = (
+            "Qwen/Qwen3.8-27B" if args.cua_provider == "tinker"
+            else "Qwen/Qwen3.6-27B" if args.cua_provider == "qwen"
+            else "gpt-5.4"
+        )
     if args.temperature is None:
-        # Qwen thinking-mode agent recommendation:
-        # temperature=0.6, top_p=0.95, top_k=20, min_p=0.0,
-        # presence_penalty=0.0, repetition_penalty=1.0.
-        args.temperature = 0.6 if args.cua_provider == "qwen" else 1.0
+        # Vision-model thinking mode recommendation.
+        args.temperature = 0.6 if qwen_style_provider else 1.0
     if args.top_p is None:
-        args.top_p = 0.95 if args.cua_provider == "qwen" else 0.9
+        args.top_p = 0.95 if qwen_style_provider else 0.9
     if args.top_k is None:
-        args.top_k = 20 if args.cua_provider == "qwen" else None
+        args.top_k = 20 if qwen_style_provider else None
     if args.min_p is None:
-        args.min_p = 0.0 if args.cua_provider == "qwen" else None
+        args.min_p = 0.0 if qwen_style_provider else None
     if args.presence_penalty is None:
         args.presence_penalty = 0.0
     if args.repetition_penalty is None:
-        args.repetition_penalty = 1.0 if args.cua_provider == "qwen" else None
+        args.repetition_penalty = 1.0 if qwen_style_provider else None
     if args.max_tokens is None:
-        args.max_tokens = 65536 if args.cua_provider == "qwen" else 4096
+        # Keep Tinker turns bounded so the shared $ cap can reserve calls without
+        # pessimistically locking the entire experiment budget.
+        args.max_tokens = 4096 if args.cua_provider == "tinker" else 65536 if args.cua_provider == "qwen" else 4096
     if args.result_dir is None:
         args.result_dir = (
             "runs/mind2web_container_qwen35vl"
-            if args.cua_provider == "qwen"
+            if qwen_style_provider
             else "runs/mind2web_container_gpt54"
         )
 
@@ -320,7 +325,7 @@ def load_osworld_dependencies() -> None:
     log_task_completion = _log_task_completion
     log_task_error = _log_task_error
 
-    if args.cua_provider == "qwen":
+    if args.cua_provider in {"qwen", "tinker"}:
         from osworld.mm_agents.qwen35vl_agent import Qwen35VLAgent as _Qwen35VLAgent
         Qwen35VLAgent = _Qwen35VLAgent
     else:
@@ -816,15 +821,18 @@ def _run_filemgmt_ipc(env, signal_dir: str, example_result_dir: str, max_bytes: 
 # Qwen agent: post-completion summary extraction
 # ---------------------------------------------------------------------------
 
-def _qwen_inference_snapshot(agent) -> tuple[float, int]:
+def _qwen_inference_snapshot(agent) -> tuple[float, int, int, int, float]:
     return (
         float(getattr(agent, "inference_time_total", 0.0) or 0.0),
         len(getattr(agent, "inference_intervals", []) or []),
+        int(getattr(agent, "input_tokens_total", 0) or 0),
+        int(getattr(agent, "output_tokens_total", 0) or 0),
+        float(getattr(agent, "api_cost_total", 0.0) or 0.0),
     )
 
 
-def _qwen_model_usage_since(agent, snapshot: tuple[float, int]) -> dict:
-    started_total, started_count = snapshot
+def _qwen_model_usage_since(agent, snapshot: tuple[float, int, int, int, float]) -> dict:
+    started_total, started_count, started_input, started_output, started_cost = snapshot
     intervals = list(getattr(agent, "inference_intervals", []) or [])[started_count:]
     inference_seconds = max(
         0.0,
@@ -834,6 +842,9 @@ def _qwen_model_usage_since(agent, snapshot: tuple[float, int]) -> dict:
         "model_time": inference_seconds,
         "inference_seconds": inference_seconds,
         "inference_intervals": intervals,
+        "input_tokens": max(0, int(getattr(agent, "input_tokens_total", 0) or 0) - started_input),
+        "output_tokens": max(0, int(getattr(agent, "output_tokens_total", 0) or 0) - started_output),
+        "cost_usd": max(0.0, float(getattr(agent, "api_cost_total", 0.0) or 0.0) - started_cost),
     }
 
 
@@ -1837,7 +1848,7 @@ def _run_single_example_openai(
 # ---------------------------------------------------------------------------
 
 def run_single_example_mind2web(agent, env, example, max_steps, instruction, args, example_result_dir, scores):
-    if args.cua_provider == "qwen":
+    if args.cua_provider in {"qwen", "tinker"}:
         _run_single_example_qwen(agent, env, example, max_steps, instruction, args, example_result_dir, scores)
     else:
         _run_single_example_openai(agent, env, example, max_steps, instruction, args, example_result_dir, scores)
@@ -1857,7 +1868,7 @@ def distribute_tasks(test_all_meta: Dict[str, List[str]]) -> List[Tuple[str, str
 
 def _create_agent(env, args):
     """Create the appropriate agent based on --cua_provider."""
-    if args.cua_provider == "qwen":
+    if args.cua_provider in {"qwen", "tinker"}:
         return Qwen35VLAgent(
             history_n=args.history_n,
             model=args.model,
@@ -1878,6 +1889,7 @@ def _create_agent(env, args):
             preserve_reasoning_content=args.preserve_reasoning_content,
             use_native_tool_calling=not args.disable_native_tool_calling,
             max_tool_calls_per_turn=args.max_tool_calls_per_turn,
+            api_backend="tinker" if args.cua_provider == "tinker" else "openai",
         )
     else:
         return GPT54Agent(

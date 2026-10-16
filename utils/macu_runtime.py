@@ -323,11 +323,14 @@ def launch_cua_subtask(
     log_file = open(log_path, "w")
 
     logger.info("Launching CUA subprocess for [%s]: %s", logical_subtask_id, " ".join(cmd))
+    child_env = os.environ.copy()
+    child_env["MACU_SETUP_VISUAL_PATH"] = str((subtask_dir / "setup_visual.png").resolve())
     proc = subprocess.Popen(
         cmd,
         stdout=log_file,
         stderr=subprocess.STDOUT,
         cwd=args.osworld_root,
+        env=child_env,
     )
     _child_processes.append(proc)
 
@@ -1993,8 +1996,24 @@ def _run_with_tasks_file(args: argparse.Namespace, cua_args: list[str]) -> None:
                 if task.get("no_initial_setup") or task.get("blank_vm"):
                     task_metadata["no_initial_setup"] = True
             _RunSingleGraphRunner(str(graph_path), args, cua_args, task_metadata=task_metadata).run()
-        except Exception:
+        except Exception as exc:
             logger.exception("Failed on task %s, continuing to next", task_id)
+            task_dir.mkdir(parents=True, exist_ok=True)
+            (task_dir / "run_error.json").write_text(
+                json.dumps(
+                    {
+                        "task_id": task_id,
+                        "error": f"{type(exc).__name__}: {exc}",
+                        "failed_at": time.time(),
+                    },
+                    indent=2,
+                ) + "\n",
+                encoding="utf-8",
+            )
+            try:
+                (task_dir / ".claimed").unlink()
+            except FileNotFoundError:
+                pass
 
     logger.info(
         "Worker %s done: processed=%d, skipped_completed=%d, skipped_claimed=%d, total=%d",
